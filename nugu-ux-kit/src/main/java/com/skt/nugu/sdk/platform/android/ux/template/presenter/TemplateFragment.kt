@@ -17,7 +17,6 @@
 package com.skt.nugu.sdk.platform.android.ux.template.presenter
 
 import android.annotation.SuppressLint
-import android.arch.lifecycle.ViewModelProvider
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -26,9 +25,11 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import com.skt.nugu.sdk.core.utils.Logger
+import com.skt.nugu.sdk.platform.android.NuguAndroidClient
 import com.skt.nugu.sdk.platform.android.ux.R
 import com.skt.nugu.sdk.platform.android.ux.template.TemplateView
 import com.skt.nugu.sdk.platform.android.ux.template.controller.TemplateHandler.TemplateInfo
+import java.lang.ref.SoftReference
 
 class TemplateFragment : Fragment() {
     companion object {
@@ -41,7 +42,7 @@ class TemplateFragment : Fragment() {
         private const val ARG_PLAY_SERVICE_ID = "play_service_id"
 
         fun newInstance(
-            nuguProvider: TemplateRenderer.NuguClientProvider,
+            nuguClient: NuguAndroidClient?,
             name: String,
             dialogRequestId: String,
             templateId: String,
@@ -51,7 +52,7 @@ class TemplateFragment : Fragment() {
         ): TemplateFragment {
             return TemplateFragment().apply {
                 arguments = createBundle(name, dialogRequestId, templateId, template, displayType, playServiceId)
-                pendingNuguProvider = nuguProvider
+                androidClientRef = SoftReference(nuguClient ?: return@apply)
             }
         }
 
@@ -73,25 +74,13 @@ class TemplateFragment : Fragment() {
             }
     }
 
-    enum class RenderNotifyState { NONE, RENDERED, RENDER_FAILED, RENDER_CLEARED }
+    private enum class RenderNotifyState { NONE, RENDERED, RENDER_FAILED, RENDER_CLEARED }
 
     private val layoutId = R.layout.fragment_template
     private var templateView: TemplateView? = null
-    private var pendingNuguProvider: TemplateRenderer.NuguClientProvider? = null
+    private var androidClientRef: SoftReference<NuguAndroidClient>? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-
-    private val viewModel: TemplateViewModel by lazy {
-        ViewModelProvider(this, ViewModelProvider.NewInstanceFactory()).get(TemplateViewModel::class.java)
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        pendingNuguProvider?.run {
-            viewModel.nuguClientProvider = this
-        }
-
-        viewModel.onClose = { onClose() }
-    }
+    private var renderNotified = RenderNotifyState.NONE
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -117,17 +106,22 @@ class TemplateFragment : Fragment() {
             with(templateView!!) {
 
                 templateHandler = BasicTemplateHandler(
-                    viewModel.nuguClientProvider,
+                    getNuguClient(),
                     TemplateInfo(getTemplateId()),
                     this@TemplateFragment)
 
                 addView(this.asView())
+                setOnTouchListener { _, _ ->
+                    getNuguClient()?.localStopTTS()
+                    false
+                }
             }
         }
     }
 
     override fun onDestroy() {
         templateView?.templateHandler?.clear()
+        onClose()
         super.onDestroy()
     }
 
@@ -135,7 +129,7 @@ class TemplateFragment : Fragment() {
         val dialogRequestId = arguments?.getString(ARG_DIALOG_REQUEST_ID, "") ?: ""
         val template = arguments?.getString(ARG_TEMPLATE, "") ?: ""
 
-        Logger.d(TAG, "[load] templateId: ${getTemplateId()}")
+        Logger.i(TAG, "[load] templateId: ${getTemplateId()}")
 
         if (template.isBlank()) {
             return
@@ -202,36 +196,41 @@ class TemplateFragment : Fragment() {
     }
 
     private fun onClose() {
-        Logger.d(TAG, "onClose.. current notifyRenderedState. ${viewModel.renderNotified}")
-        if (viewModel.renderNotified == RenderNotifyState.RENDERED) {
+        if (renderNotified == RenderNotifyState.RENDERED) {
             notifyCleared()
-        } else if (viewModel.renderNotified == RenderNotifyState.NONE) {
+        } else if (renderNotified == RenderNotifyState.NONE) {
             notifyRenderFailed()
         }
     }
 
     fun startListening() {
-        viewModel.nuguClientProvider.getNuguClient().asrAgent?.startRecognition()
+        getNuguClient()?.asrAgent?.startRecognition()
     }
 
     private fun notifyRendered() {
-        if (viewModel.renderNotified == RenderNotifyState.NONE) {
-            Logger.i(TAG, "notifyRendered ${getTemplateId()}")
-            viewModel.nuguClientProvider.getNuguClient().getDisplay()
-                ?.displayCardRendered(getTemplateId(), (templateView?.templateHandler as? BasicTemplateHandler)?.displayController)
-            viewModel.renderNotified = RenderNotifyState.RENDERED
-        }
+        Logger.d(TAG, "notifyRendered ${getTemplateId()}")
+        getNuguClient()?.getDisplay()
+            ?.displayCardRendered(getTemplateId(), (templateView?.templateHandler as? BasicTemplateHandler)?.displayController)
+        renderNotified = RenderNotifyState.RENDERED
     }
 
     private fun notifyRenderFailed() {
-        Logger.i(TAG, "notifyRenderFailed ${getTemplateId()}")
-        viewModel.nuguClientProvider.getNuguClient().getDisplay()?.displayCardRenderFailed(getTemplateId())
-        viewModel.renderNotified = RenderNotifyState.RENDER_FAILED
+        Logger.d(TAG, "notifyRenderFailed ${getTemplateId()}")
+        getNuguClient()?.getDisplay()?.displayCardRenderFailed(getTemplateId())
+        renderNotified = RenderNotifyState.RENDER_FAILED
     }
 
     private fun notifyCleared() {
-        Logger.i(TAG, "notifyRenderCleared ${getTemplateId()}")
-        viewModel.nuguClientProvider.getNuguClient().getDisplay()?.displayCardCleared(getTemplateId())
-        viewModel.renderNotified = RenderNotifyState.RENDER_CLEARED
+        Logger.d(TAG, "notifyRenderCleared ${getTemplateId()}")
+        getNuguClient()?.getDisplay()?.displayCardCleared(getTemplateId())
+        renderNotified = RenderNotifyState.RENDER_CLEARED
+    }
+
+    private fun getNuguClient(): NuguAndroidClient? {
+        return androidClientRef?.get().also {
+            if (it == null) {
+                Logger.e(TAG, "NuguAndroidClient doesn't exist!! Something will go wrong")
+            }
+        }
     }
 }

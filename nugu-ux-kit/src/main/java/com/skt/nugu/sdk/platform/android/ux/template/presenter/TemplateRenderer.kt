@@ -13,10 +13,11 @@ import com.skt.nugu.sdk.core.interfaces.message.Header
 import com.skt.nugu.sdk.core.utils.Logger
 import com.skt.nugu.sdk.platform.android.NuguAndroidClient
 import org.json.JSONObject
+import java.lang.ref.SoftReference
 import java.lang.ref.WeakReference
 
 class TemplateRenderer(
-    private val nuguClientProvider: NuguClientProvider,
+    nuguAndroidClient: NuguAndroidClient,
     deviceTypeCode: String,
     fragmentManager: FragmentManager,
     private val containerId: Int
@@ -28,9 +29,7 @@ class TemplateRenderer(
         internal var DEVICE_TYPE_CODE = "device_type_code"
     }
 
-    interface NuguClientProvider {
-        fun getNuguClient() : NuguAndroidClient
-    }
+    private val androidClientRef = SoftReference(nuguAndroidClient)
 
     private val fragmentManagerRef = WeakReference(fragmentManager)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -40,7 +39,7 @@ class TemplateRenderer(
     init {
         DEVICE_TYPE_CODE = deviceTypeCode
         //Empty lyrics presenter for receiving lyrics. Actual lyrics control works in each TemplateView.
-        nuguClientProvider.getNuguClient().audioPlayerAgent?.setLyricsPresenter(object : LyricsPresenter{
+        getNuguClient()?.audioPlayerAgent?.setLyricsPresenter(object : LyricsPresenter{
             override fun getVisibility(): Boolean {
                 return false
             }
@@ -107,7 +106,7 @@ class TemplateRenderer(
                         .add(
                             containerId,
                             TemplateFragment.newInstance(
-                                nuguProvider = nuguClientProvider,
+                                nuguClient = getNuguClient(),
                                 name = templateType,
                                 dialogRequestId = header.dialogRequestId,
                                 templateId = templateId,
@@ -186,6 +185,14 @@ class TemplateRenderer(
         }
 
         return content
+    }
+
+    private fun getNuguClient(): NuguAndroidClient? {
+        return androidClientRef.get().also {
+            if (it == null) {
+                Logger.e(TAG, "NuguAndroidClient doesn't exist!! Something will go wrong")
+            }
+        }
     }
 
     fun useStageServer(use: Boolean = true) {
