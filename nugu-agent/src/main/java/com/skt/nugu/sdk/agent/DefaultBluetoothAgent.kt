@@ -35,6 +35,7 @@ import com.skt.nugu.sdk.core.utils.Logger
 import com.skt.nugu.sdk.core.utils.UUIDGeneration
 import java.util.*
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.collections.HashMap
 
@@ -43,7 +44,8 @@ class DefaultBluetoothAgent(
     private val contextManager: ContextManagerInterface,
     focusManager: FocusManagerInterface,
     focusChannelName: String,
-    private val bluetoothProvider : BluetoothProvider?
+    private val bluetoothProvider : BluetoothProvider?,
+    focusChangeHandler: OnFocusChangeHandler?
 ) : AbstractCapabilityAgent(NAMESPACE),
     BluetoothAgentInterface {
     /**
@@ -175,16 +177,21 @@ class DefaultBluetoothAgent(
     private var listener : Listener? = null
     private val eventBus = BluetoothEventBus()
 
-    inner class StreamingChangeHandler(
+    interface OnFocusChangeHandler {
+        fun onFocusChanged(focus: FocusState, streamingState: StreamingState)
+    }
+
+    class StreamingChangeHandler(
         private val focusManager: FocusManagerInterface,
-        private val focusChannelName: String
+        private val focusChannelName: String,
+        private val executor: ExecutorService,
+        private val focusChangeHandler: OnFocusChangeHandler
     ) : BluetoothProvider.OnStreamStateChangeListener
         ,ChannelObserver {
-        private var focusState = FocusState.NONE
-        private var streamingState: BluetoothAgentInterface.StreamingState =
-            BluetoothAgentInterface.StreamingState.INACTIVE
+        private var streamingState: StreamingState =
+            StreamingState.INACTIVE
 
-        override fun onStreamStateChanged(state: BluetoothAgentInterface.StreamingState) {
+        override fun onStreamStateChanged(state: StreamingState) {
             executor.submit {
                 Logger.d(TAG, "[onStreamStateChanged] $streamingState , $state")
                 if (streamingState == state) {
@@ -192,24 +199,24 @@ class DefaultBluetoothAgent(
                 }
 
                 when (state) {
-                    BluetoothAgentInterface.StreamingState.ACTIVE -> {
-                        if (streamingState == BluetoothAgentInterface.StreamingState.INACTIVE || streamingState == BluetoothAgentInterface.StreamingState.UNUSABLE) {
+                    StreamingState.ACTIVE -> {
+                        if (streamingState == StreamingState.INACTIVE || streamingState == StreamingState.UNUSABLE) {
                             // request focus
                             focusManager.acquireChannel(focusChannelName, this, NAMESPACE)
-                        } else if (streamingState == BluetoothAgentInterface.StreamingState.PAUSED) {
+                        } else if (streamingState == StreamingState.PAUSED) {
                             // ignore
                         }
                     }
-                    BluetoothAgentInterface.StreamingState.UNUSABLE,
-                    BluetoothAgentInterface.StreamingState.INACTIVE -> {
-                        if (streamingState == BluetoothAgentInterface.StreamingState.ACTIVE || streamingState == BluetoothAgentInterface.StreamingState.PAUSED) {
+                    StreamingState.UNUSABLE,
+                    StreamingState.INACTIVE -> {
+                        if (streamingState == StreamingState.ACTIVE || streamingState == StreamingState.PAUSED) {
                             // release focus
                             focusManager.releaseChannel(focusChannelName, this)
-                        } else if (streamingState == BluetoothAgentInterface.StreamingState.UNUSABLE) {
+                        } else if (streamingState == StreamingState.UNUSABLE) {
                             // ignore
                         }
                     }
-                    BluetoothAgentInterface.StreamingState.PAUSED -> {
+                    StreamingState.PAUSED -> {
                         // no-op
                     }
                 }
@@ -220,35 +227,7 @@ class DefaultBluetoothAgent(
 
         override fun onFocusChanged(newFocus: FocusState) {
             executor.submit {
-                Logger.d(TAG, "[onFocusChanged] $focusState , $newFocus")
-                if(focusState == newFocus) {
-                    return@submit
-                }
-
-                when(newFocus) {
-                    FocusState.FOREGROUND -> {
-                        val shouldResume = playbackHandlingDirectiveQueue.isEmpty()
-                                && streamingState == BluetoothAgentInterface.StreamingState.PAUSED
-                        if (shouldResume) {
-                            // resume
-                            executePlay()
-                        }
-                    }
-                    FocusState.BACKGROUND -> {
-                        if(streamingState == BluetoothAgentInterface.StreamingState.ACTIVE) {
-                            // pause
-                            executePause()
-                        }
-                    }
-                    FocusState.NONE -> {
-                        if(streamingState == BluetoothAgentInterface.StreamingState.ACTIVE || streamingState == BluetoothAgentInterface.StreamingState.PAUSED) {
-                            // stop
-                            executeStop()
-                        }
-                    }
-                }
-
-                focusState = newFocus
+                focusChangeHandler.onFocusChanged(newFocus, streamingState)
             }
         }
     }
@@ -259,11 +238,54 @@ class DefaultBluetoothAgent(
          */
         contextManager.setStateProvider(namespaceAndName, this)
 
-        if(bluetoothProvider == null) {
+        if (bluetoothProvider == null) {
             provideState(contextManager, namespaceAndName, ContextType.FULL, 0)
             provideState(contextManager, namespaceAndName, ContextType.COMPACT, 0)
         } else {
-            bluetoothProvider.setOnStreamStateChangeListener(StreamingChangeHandler(focusManager, focusChannelName))
+            bluetoothProvider.setOnStreamStateChangeListener(
+                StreamingChangeHandler(
+                    focusManager,
+                    focusChannelName,
+                    executor,
+                    focusChangeHandler ?: object : OnFocusChangeHandler {
+                        private var focusState = FocusState.NONE
+
+                        override fun onFocusChanged(
+                            focus: FocusState,
+                            streamingState: StreamingState
+                        ) {
+                            Logger.d(TAG, "[onFocusChanged] $focusState , $focus")
+                            if (focusState == focus) {
+                                return
+                            }
+
+                            when (focus) {
+                                FocusState.FOREGROUND -> {
+                                    val shouldResume = playbackHandlingDirectiveQueue.isEmpty()
+                                            && streamingState == StreamingState.PAUSED
+                                    if (shouldResume) {
+                                        // resume
+                                        executePlay()
+                                    }
+                                }
+                                FocusState.BACKGROUND -> {
+                                    if (streamingState == StreamingState.ACTIVE) {
+                                        // pause
+                                        executePause()
+                                    }
+                                }
+                                FocusState.NONE -> {
+                                    if (streamingState == StreamingState.ACTIVE || streamingState == StreamingState.PAUSED) {
+                                        // stop
+                                        executeStop()
+                                    }
+                                }
+                            }
+
+                            focusState = focus
+                        }
+                    })
+            )
         }
     }
 

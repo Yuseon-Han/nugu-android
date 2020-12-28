@@ -22,20 +22,17 @@ import com.skt.nugu.sdk.agent.display.DisplayAggregatorInterface
 import com.skt.nugu.sdk.agent.playback.PlaybackButton
 import com.skt.nugu.sdk.core.utils.Logger
 import com.skt.nugu.sdk.platform.android.NuguAndroidClient
+import com.skt.nugu.sdk.platform.android.ux.template.presenter.TemplateRenderer
 import com.skt.nugu.sdk.platform.android.ux.template.view.media.PlayerCommand
-import java.lang.ref.WeakReference
 import java.util.*
 import kotlin.concurrent.fixedRateTimer
 
-open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var templateInfo: TemplateInfo) : TemplateHandler {
-
-    data class TemplateInfo(val templateId: String)
+open class DefaultTemplateHandler(val nuguProvider: TemplateRenderer.NuguClientProvider, override var templateInfo: TemplateHandler.TemplateInfo) :
+    TemplateHandler {
 
     companion object {
         private const val TAG = "DefaultTemplateHandler"
     }
-
-    val androidClientRef = WeakReference(androidClient)
 
     private var audioDurationMs = 0L
     private var mediaProgressJob: Timer? = null
@@ -92,12 +89,12 @@ open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var template
 
     override fun onElementSelected(tokenId: String) {
         Logger.i(TAG, "onElementSelected() $tokenId")
-        androidClientRef.get()?.run { getDisplay()?.setElementSelected(templateInfo.templateId, tokenId) }
+        getNuguClient().getDisplay()?.setElementSelected(templateInfo.templateId, tokenId)
     }
 
     override fun onChipSelected(text: String) {
         Logger.i(TAG, "ohChipSelected() $text")
-        androidClientRef.get()?.run { requestTextInput(text) }
+        getNuguClient().requestTextInput(text)
     }
 
     override fun onCloseClicked() {
@@ -126,7 +123,7 @@ open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var template
 
     override fun playTTS(text: String) {
         Logger.i(TAG, "onTTSRequested() $text")
-        androidClientRef.get()?.run { requestTTS(text) }
+        getNuguClient().requestTTS(text)
     }
 
     override fun setClientListener(listener: TemplateHandler.ClientListener) {
@@ -135,7 +132,7 @@ open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var template
 
     override fun onPlayerCommand(command: String, param: String) {
         Logger.i(TAG, "onPlayerCommand() $command, $param ")
-        androidClientRef.get()?.run {
+        getNuguClient().run {
             when (PlayerCommand.from(command)) {
                 PlayerCommand.PLAY -> getPlaybackRouter().buttonPressed(PlaybackButton.PLAY)
                 PlayerCommand.STOP -> getPlaybackRouter().buttonPressed(PlaybackButton.STOP)
@@ -165,7 +162,7 @@ open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var template
     }
 
     private fun getMediaCurrentTimeMs(): Long {
-        return androidClientRef.get()?.audioPlayerAgent?.getOffset()?.times(1000L) ?: 0L
+        return getNuguClient().audioPlayerAgent?.getOffset()?.times(1000L) ?: 0L
     }
 
     private fun getMediaProgressPercentage(): Float {
@@ -176,13 +173,13 @@ open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var template
 
     fun observeMediaState() {
         Logger.i(TAG, "observeMediaState")
-        androidClientRef.get()?.audioPlayerAgent?.addListener(mediaStateListener)
-        androidClientRef.get()?.audioPlayerAgent?.addOnDurationListener(mediaDurationListener)
+        getNuguClient().audioPlayerAgent?.addListener(mediaStateListener)
+        getNuguClient().audioPlayerAgent?.addOnDurationListener(mediaDurationListener)
     }
 
     override fun clear() {
         Logger.i(TAG, "clear")
-        androidClientRef.get()?.audioPlayerAgent?.run {
+        getNuguClient().audioPlayerAgent?.run {
             Logger.i(TAG, "mediaStateListener removed successfully")
             removeListener(mediaStateListener)
             removeOnDurationListener(mediaDurationListener)
@@ -190,4 +187,6 @@ open class DefaultTemplateHandler(androidClient: NuguAndroidClient, var template
 
         stopMediaProgressSending()
     }
+
+    fun getNuguClient() : NuguAndroidClient = nuguProvider.getNuguClient()
 }

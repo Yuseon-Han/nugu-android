@@ -21,6 +21,7 @@ import com.skt.nugu.sdk.client.port.transport.grpc2.utils.MessageRequestConverte
 import com.skt.nugu.sdk.core.interfaces.message.Call
 import com.skt.nugu.sdk.core.interfaces.message.request.AttachmentMessageRequest
 import com.skt.nugu.sdk.core.interfaces.message.request.EventMessageRequest
+import com.skt.nugu.sdk.core.interfaces.transport.CallOptions
 import com.skt.nugu.sdk.core.utils.Logger
 import devicegateway.grpc.Downstream
 import devicegateway.grpc.Upstream
@@ -44,17 +45,18 @@ import java.util.concurrent.ScheduledExecutorService
 internal class EventsService(
     private val channel: ManagedChannel,
     private val observer: DeviceGatewayTransport,
-    private val scheduler: ScheduledExecutorService
+    private val scheduler: ScheduledExecutorService,
+    private val callOptions: CallOptions?
 ) {
     companion object {
         private const val TAG = "EventsService"
-        private const val defaultTimeout: Long = 1000 * 10L
     }
 
     private val isShutdown = AtomicBoolean(false)
     private val streamLock = ReentrantLock()
 
     private val requestStreamMap = ConcurrentHashMap<String, ClientChannel?>()
+    private val waitForReady = callOptions?.waitForReady ?: true
 
     internal data class ClientChannel (
         val clientCall : StreamObserver<Upstream>,
@@ -64,7 +66,12 @@ internal class EventsService(
     private fun buildChannel(streamId: String, call: Call, expectedAttachment: Boolean): ClientChannel? {
         if (!isShutdown.get()) {
             val responseObserver = ClientCallStreamObserver(streamId, call, expectedAttachment)
-            VoiceServiceGrpc.newStub(channel).withWaitForReady()?.events(responseObserver)?.apply {
+            val newStub = if(waitForReady) {
+                VoiceServiceGrpc.newStub(channel).withWaitForReady()
+            } else {
+                VoiceServiceGrpc.newStub(channel)
+            }
+            newStub?.events(responseObserver)?.apply {
                 return ClientChannel(
                     this, scheduleTimeout(streamId, call),
                     responseObserver
@@ -232,6 +239,11 @@ internal class EventsService(
         } catch (e: IllegalStateException) {
             // Perhaps, Stream is already completed, no further calls are allowed
             Logger.w(TAG, "[sendAttachmentMessage] Exception : ${e.cause} ${e.message}")
+            val status = Status.fromThrowable(e)
+            call.onComplete(SDKStatus.fromCode(status.code.value()).apply {
+                description = status.description ?: status.cause?.message
+                cause = status.cause
+            })
             return false
         }
         return true
@@ -262,6 +274,11 @@ internal class EventsService(
         } catch (e: IllegalStateException) {
             // Perhaps, Stream is already completed, no further calls are allowed
             Logger.w(TAG, "[sendEventMessage] Exception : ${e.cause} ${e.message}")
+            val status = Status.fromThrowable(e)
+            call.onComplete(SDKStatus.fromCode(status.code.value()).apply {
+                description = status.description ?: status.cause?.message
+                cause = status.cause
+            })
             return false
         }
         return true

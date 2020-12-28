@@ -15,9 +15,12 @@
  */
 package com.skt.nugu.sdk.platform.android.ux.template.webview
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.util.AttributeSet
+import android.view.MotionEvent
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -25,15 +28,21 @@ import android.webkit.WebView
 import com.google.gson.Gson
 import com.skt.nugu.sdk.agent.audioplayer.AudioPlayerAgentInterface
 import com.skt.nugu.sdk.agent.audioplayer.AudioPlayerAgentInterface.State
+import com.skt.nugu.sdk.agent.audioplayer.lyrics.LyricsPresenter
 import com.skt.nugu.sdk.agent.common.Direction
 import com.skt.nugu.sdk.core.utils.Logger
 import com.skt.nugu.sdk.platform.android.BuildConfig
+import com.skt.nugu.sdk.platform.android.ux.template.TemplateUtils
 import com.skt.nugu.sdk.platform.android.ux.template.TemplateView
 import com.skt.nugu.sdk.platform.android.ux.template.controller.TemplateHandler
 import com.skt.nugu.sdk.platform.android.ux.template.model.TemplateContext
 import java.lang.ref.SoftReference
 import java.net.URLEncoder
+import java.util.*
+import kotlin.concurrent.fixedRateTimer
+import com.skt.nugu.sdk.platform.android.ux.template.controller.DefaultTemplateHandler
 
+@SuppressLint("ClickableViewAccessibility")
 class TemplateWebView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -53,16 +62,43 @@ class TemplateWebView @JvmOverloads constructor(
 
     override var templateHandler: TemplateHandler? = null
         set(value) {
+            field = value
             value?.run {
                 addJavascriptInterface(WebAppInterface(value), "Android")
                 value.setClientListener(this@TemplateWebView)
+                (this as? DefaultTemplateHandler)?.getNuguClient()?.audioPlayerAgent?.setLyricsPresenter(lyricPresenter)
             }
         }
+
+    private val lyricPresenter = object : LyricsPresenter {
+        override fun getVisibility(): Boolean {
+            return lyricsVisible
+        }
+
+        override fun show(): Boolean {
+            callJSFunction(JavaScriptHelper.showLyrics())
+            return true
+        }
+
+        override fun hide(): Boolean {
+            callJSFunction(JavaScriptHelper.hideLyrics())
+            return true
+        }
+
+        override fun controlPage(direction: Direction): Boolean {
+            callJSFunction(JavaScriptHelper.controlScroll(direction))
+            return true
+        }
+    }
 
     private var mediaDurationMs = 1L
     private var focusedItemToken: String? = null
     private var visibleTokenList: List<String>? = null
     private var lyricsVisible: Boolean = false
+
+    private var notifyUserInteractionTimer: Timer? = null
+    private var onLoadingComplete: (() -> Unit)? = null
+    private var isSupportVisibleOrFocusedToken: Boolean = false
 
     init {
         setBackgroundColor(Color.TRANSPARENT)
@@ -78,7 +114,7 @@ class TemplateWebView @JvmOverloads constructor(
             saveFormData = false
             setSupportZoom(false)
             builtInZoomControls = false
-            useWideViewPort = false
+            useWideViewPort = true
             loadWithOverviewMode = false
             allowFileAccess = true
             allowContentAccess = true
@@ -96,20 +132,34 @@ class TemplateWebView @JvmOverloads constructor(
 //        settings.setAppCachePath(activity?.cacheDir?.absolutePath)
 //        settings.setAppCacheEnabled(true)
 //        settings.cacheMode = WebSettings.LOAD_DEFAULT
+
+
+        setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> startNotifyDisplayInteraction()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> stopNotifyDisplayInteraction()
+            }
+            false
+        }
     }
 
     override fun setServerUrl(url: String) {
         templateUrl = url
     }
 
-    override fun load(templateContent: String, deviceTypeCode: String, dialogRequestId: String, onLoadingComplete: (() -> Unit)?) {
-        Logger.i(TAG, "load() $templateContent")
+    override fun load(templateContent: String, deviceTypeCode: String, dialogRequestId: String, onLoadingCallback: (() -> Unit)?) {
+        Logger.d(TAG, "load() $templateContent")
 
-        onLoadingComplete?.let {
-            webChromeClient = object : WebChromeClient() {
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    Logger.i(TAG, "progressChanged() $newProgress")
-                    if (newProgress == 100) it.invoke()
+        onLoadingComplete = onLoadingCallback
+        isSupportVisibleOrFocusedToken =
+            TemplateUtils.isSupportFocusedItemToken(templateContent) || TemplateUtils.isSupportVisibleTokenList(templateContent)
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                Logger.d(TAG, "progressChanged() $newProgress, isSupportVisibleOrFocusToken $isSupportVisibleOrFocusedToken ")
+                if (newProgress == 100 && !isSupportVisibleOrFocusedToken) {
+                    onLoadingComplete?.invoke()
+                    onLoadingComplete = null
                 }
             }
         }
@@ -133,14 +183,29 @@ class TemplateWebView @JvmOverloads constructor(
         }.toByteArray())
     }
 
-    override fun update(templateContent: String, dialogRequestedId: String, onLoadingComplete: (() -> Unit)?) {
-        loadUrl(JavaScriptHelper.onDuxReceived(dialogRequestedId, templateContent))
-        onLoadingComplete?.invoke()
+    override fun update(templateContent: String, dialogRequestedId: String, onLoadingCallback: (() -> Unit)?) {
+        Logger.d(TAG, "update() $templateContent")
+
+        onLoadingComplete = onLoadingCallback
+        isSupportVisibleOrFocusedToken =
+            TemplateUtils.isSupportFocusedItemToken(templateContent) || TemplateUtils.isSupportVisibleTokenList(templateContent)
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                Logger.d(TAG, "progressChanged() $newProgress, isSupportVisibleOrFocusToken $isSupportVisibleOrFocusedToken ")
+                if (newProgress == 100 && !isSupportVisibleOrFocusedToken) {
+                    onLoadingComplete?.invoke()
+                    onLoadingComplete = null
+                }
+            }
+        }
+
+        callJSFunction(JavaScriptHelper.onDuxReceived(dialogRequestedId, templateContent))
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        Logger.i(TAG, "onDetachedFromWindow")
+        Logger.d(TAG, "onDetachedFromWindow")
         templateHandler?.clear()
     }
 
@@ -203,7 +268,7 @@ class TemplateWebView @JvmOverloads constructor(
 
         @JavascriptInterface
         fun onControlResult(action: String, result: String) {
-            Logger.i(TAG, "[onControlResult] action: $action, result: $result")
+            Logger.d(TAG, "[onControlResult] action: $action, result: $result")
 
             weakReference.get()?.run {
                 onControlResult(action, result)
@@ -212,7 +277,12 @@ class TemplateWebView @JvmOverloads constructor(
 
         @JavascriptInterface
         fun onContextChanged(context: String) {
-            Logger.i(TAG, "[onContextChanged] context: $context")
+            Logger.d(TAG, "[onContextChanged] isSupportVisibleOrFocusToken $isSupportVisibleOrFocusedToken \n context: $context")
+
+            if (isSupportVisibleOrFocusedToken) {
+                onLoadingComplete?.invoke()
+                onLoadingComplete = null
+            }
 
             weakReference.get()?.run {
                 onContextChanged(context)
@@ -239,19 +309,19 @@ class TemplateWebView @JvmOverloads constructor(
 
     override fun onMediaStateChanged(activity: AudioPlayerAgentInterface.State, currentTimeMs: Long, currentProgress: Float) {
         when (activity) {
-            State.IDLE -> loadUrl(JavaScriptHelper.onPlayStopped())
+            State.IDLE -> callJSFunction(JavaScriptHelper.onPlayStopped())
             State.PLAYING -> {
-                loadUrl(JavaScriptHelper.setCurrentTime(currentTimeMs))
-                loadUrl(JavaScriptHelper.setProgress(currentProgress))
-                loadUrl(JavaScriptHelper.onPlayStarted())
-                loadUrl(JavaScriptHelper.setEndTime(mediaDurationMs))
+                callJSFunction(JavaScriptHelper.setCurrentTime(currentTimeMs))
+                callJSFunction(JavaScriptHelper.setProgress(currentProgress))
+                callJSFunction(JavaScriptHelper.onPlayStarted())
+                callJSFunction(JavaScriptHelper.setEndTime(mediaDurationMs))
             }
-            State.STOPPED -> loadUrl(JavaScriptHelper.onPlayStopped())
-            State.PAUSED -> loadUrl(JavaScriptHelper.onPlayPaused())
+            State.STOPPED -> callJSFunction(JavaScriptHelper.onPlayStopped())
+            State.PAUSED -> callJSFunction(JavaScriptHelper.onPlayPaused())
             State.FINISHED -> {
-                loadUrl(JavaScriptHelper.setCurrentTime(mediaDurationMs))
-                loadUrl(JavaScriptHelper.setProgress(100f))
-                loadUrl(JavaScriptHelper.onPlayEnd())
+                callJSFunction(JavaScriptHelper.setCurrentTime(mediaDurationMs))
+                callJSFunction(JavaScriptHelper.setProgress(100f))
+                callJSFunction(JavaScriptHelper.onPlayEnd())
             }
         }
     }
@@ -261,16 +331,16 @@ class TemplateWebView @JvmOverloads constructor(
     }
 
     override fun onMediaProgressChanged(progress: Float, currentTimeMs: Long) {
-        loadUrl(JavaScriptHelper.setProgress(progress))
+        callJSFunction(JavaScriptHelper.setProgress(progress))
     }
 
     override fun controlFocus(direction: Direction): Boolean {
-        loadUrl(JavaScriptHelper.controlFocus(direction))
+        callJSFunction(JavaScriptHelper.controlFocus(direction))
         return true
     }
 
     override fun controlScroll(direction: Direction): Boolean {
-        loadUrl(JavaScriptHelper.controlScroll(direction))
+        callJSFunction(JavaScriptHelper.controlScroll(direction))
         return true
     }
 
@@ -280,5 +350,37 @@ class TemplateWebView @JvmOverloads constructor(
 
     override fun getVisibleTokenList(): List<String>? {
         return visibleTokenList
+    }
+
+    private fun startNotifyDisplayInteraction() {
+        fun notifyDisplayInteraction(): String? {
+            val handler = templateHandler ?: return "templateHandler is null"
+            val androidClient = (handler as? DefaultTemplateHandler)?.getNuguClient()
+                ?: return "androidClient is null"
+            androidClient.displayAgent?.notifyUserInteraction(handler.templateInfo.templateId)
+            return null
+        }
+
+        notifyUserInteractionTimer?.cancel()
+        notifyUserInteractionTimer = fixedRateTimer(initialDelay = 0, period = 1000, action = {
+            notifyDisplayInteraction()?.run {
+                Logger.w(TAG, "notifyDisplayInteraction() not handled. reason: $this")
+            }
+        })
+    }
+
+    private fun stopNotifyDisplayInteraction() {
+        notifyUserInteractionTimer?.cancel()
+    }
+
+    private fun callJSFunction(script: String) {
+        if (isAttachedToWindow) {
+            post { loadUrl(script) }
+        }
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean {
+        (templateHandler as? DefaultTemplateHandler)?.getNuguClient()?.localStopTTS()
+        return super.onInterceptTouchEvent(ev)
     }
 }

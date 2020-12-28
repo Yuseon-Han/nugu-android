@@ -92,6 +92,8 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
 
     private val thumbTransform = RoundedCorners(dpToPx(10.7f, context))
 
+    private var audioPlayerItem: AudioPlayer? = null
+
     private fun <T> fromJsonOrNull(json: String, classOfT: Class<T>): T? {
         return try {
             gson.fromJson(json, classOfT)
@@ -107,13 +109,13 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
                 (this as? DefaultTemplateHandler)?.run {
                     observeMediaState()
                     setClientListener(mediaListener)
-                    androidClientRef.get()?.audioPlayerAgent?.setLyricsPresenter(lyricPresenter)
+                    getNuguClient().audioPlayerAgent?.setLyricsPresenter(lyricPresenter)
                 }
             }
         }
 
     private val mediaListener = object : TemplateHandler.ClientListener {
-        override fun onMediaStateChanged(activity: AudioPlayerAgentInterface.State, currentTime: Long, currentProgress: Float) {
+        override fun onMediaStateChanged(activity: AudioPlayerAgentInterface.State, currentTimeMs: Long, currentProgress: Float) {
             post {
                 if (activity == AudioPlayerAgentInterface.State.PLAYING) {
                     play.setImageResource(R.drawable.btn_pause_48)
@@ -126,6 +128,12 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
         }
 
         override fun onMediaDurationRetrieved(durationMs: Long) {
+            audioPlayerItem?.run {
+                if (content.durationSec == null) {
+                    return
+                }
+            }
+
             fulltime.post {
                 mediaDurationMs = durationMs
                 fulltime.updateText(TemplateUtils.convertToTimeMs(durationMs.toInt()), true)
@@ -133,6 +141,12 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
         }
 
         override fun onMediaProgressChanged(progress: Float, currentTimeMs: Long) {
+            audioPlayerItem?.run {
+                if (content.durationSec == null) {
+                    return
+                }
+            }
+
             post {
                 progressView.isEnabled = true
                 playtime.updateText(TemplateUtils.convertToTimeMs(currentTimeMs.toInt()), true)
@@ -163,7 +177,7 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
             expand()
         }
 
-        smallLyricsView.setOnClickListener {
+        smallLyricsView.setThrottledOnClickListener {
             lyricPresenter.show()
         }
 
@@ -230,7 +244,7 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
 
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
                     Logger.i(TAG, "onStopTrackingTouch ${progressView.progress}")
-                    (templateHandler as? DefaultTemplateHandler)?.androidClientRef?.get()?.run {
+                    (templateHandler as? DefaultTemplateHandler)?.getNuguClient()?.run {
                         val offset = mediaDurationMs / 100 * progressView.progress
                         audioPlayerAgent?.seek(offset)
                     }
@@ -251,7 +265,7 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
 
                         MotionEvent.ACTION_UP -> {
                             if (System.currentTimeMillis() - touchDownTime < ViewConfiguration.getTapTimeout()) {
-                                (templateHandler as? DefaultTemplateHandler)?.androidClientRef?.get()?.run {
+                                (templateHandler as? DefaultTemplateHandler)?.getNuguClient()?.run {
                                     val offset = event.x / progressView.width.toFloat() * mediaDurationMs
                                     audioPlayerAgent?.seek(offset.toLong())
                                 }
@@ -265,7 +279,7 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
     }
 
     override fun load(templateContent: String, deviceTypeCode: String, dialogRequestId: String, onLoadingComplete: (() -> Unit)?) {
-        Logger.i(TAG, "load. $templateContent")
+        Logger.i(TAG, "load. dialogRequestId: $dialogRequestId")
 
         fromJsonOrNull(templateContent, AudioPlayer::class.java)?.let { item ->
             load(item)
@@ -274,12 +288,33 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
     }
 
     override fun update(templateContent: String, dialogRequestedId: String, onLoadingComplete: (() -> Unit)?) {
+        Logger.i(TAG, "update. dialogRequestId $dialogRequestedId")
+
+        var audioPlayer: AudioPlayer? = null
+
         fromJsonOrNull(templateContent, AudioPlayerUpdate::class.java)?.let { item ->
-            load(item.player, true)
+            audioPlayer = item.player
+        }
+
+        // templateContent model be expected as AudioPlayerUpdate. but other case have found. try parsing as AudioPlayer
+        if (audioPlayer == null) {
+            fromJsonOrNull(templateContent, AudioPlayer::class.java)?.let { item ->
+                audioPlayer = item
+            }
+        }
+
+        audioPlayer.run {
+            if (this != null) {
+                load(this, true)
+            } else {
+                Logger.e(TAG, "update. fail. audioPlayer info not exists")
+            }
         }
     }
 
     private fun load(item: AudioPlayer, isMerge: Boolean = false) {
+        audioPlayerItem = item
+
         item.title?.run {
             titleView.updateText(text, isMerge)
             logoView.updateImage(iconUrl, thumbTransform, isMerge)
@@ -385,12 +420,21 @@ constructor(private val templateType: String, context: Context, attrs: Attribute
         }
 
         override fun controlPage(direction: Direction): Boolean {
-            return false
+            Logger.d(TAG, "controlPage $direction")
+            lyricsView.post {
+                lyricsView.controlPage(direction)
+            }
+            return true
         }
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         templateHandler?.clear()
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean {
+        (templateHandler as? DefaultTemplateHandler)?.getNuguClient()?.localStopTTS()
+        return super.onInterceptTouchEvent(ev)
     }
 }
